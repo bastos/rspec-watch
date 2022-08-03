@@ -1,0 +1,72 @@
+#!/bin/env ruby
+
+# This is a simple test runner for Rails projects, it requires no configuration.
+# The command can be changed using the RSPEC_COMMAND environment variable.
+# It will check the app, lib, and spec directories for changes in .rb files.
+
+require 'bundler/inline'
+require 'pathname'
+require 'fiber'
+
+gemfile do
+  source 'https://rubygems.org'
+
+  gem 'listen', require: true
+end
+
+RSPEC_COMMAND = ENV.fetch('RSPEC_COMMAND') { 'bundle exec rspec -f doc' }
+
+trap 'SIGINT' do
+  puts 'Exiting...'
+  exit 0
+end
+
+def run_spec(test_file)
+  command = "#{RSPEC_COMMAND} #{test_file}"
+  Kernel.system(command)
+  result = $CHILD_STATUS
+  errors = (result == 0) || "Failed to run: #{test_file}"
+  [result, nil, errors]
+end
+
+def spec_file(path)
+  test_file_string = path.to_s
+
+  test_file = if test_file_string.end_with?('_spec.rb') && test_file_string.start_with?('spec/')
+                path
+              elsif test_file_string.start_with?('app/')
+                File.join('./spec', path.relative_path_from('app/')).sub('.rb', '_spec.rb')
+              elsif test_file_string.start_with?('lib/')
+                File.join('./spec', path).sub('.rb', '_spec.rb')
+              end
+
+  test_file && File.exist?(test_file) ? test_file : nil
+end
+
+queue = Queue.new
+
+listener = Listen.to('./app', './lib', './spec', relative: true, only: /.rb$/) do |modified, added, _removed|
+  next unless modified.any? || added.any?
+
+  files = modified + added
+
+  files.map { |path_name| Pathname.new(path_name) }.each do |path|
+    next unless (test_file = spec_file(path))
+
+    queue << test_file
+  end
+end
+
+background_fiber = Fiber.new do
+  listener.start
+
+  loop do
+    sleep(0.5)
+    next if queue.empty?
+
+    test_file = queue.pop
+    run_spec(test_file) if test_file
+  end
+end
+
+background_fiber.resume
